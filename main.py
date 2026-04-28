@@ -179,6 +179,7 @@ def main():
         # Pre-warm the key mappings for the keyboard module hook install
         keyboard.key_to_scan_codes(key)
     save_buff = False
+    os.makedirs("assets\\test\\material", exist_ok=True)
 
     try:
         with mss.MSS() as sct:
