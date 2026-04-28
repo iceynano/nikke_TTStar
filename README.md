@@ -16,7 +16,7 @@ By the way, my desktop resolution is 1920x1080, so if you could just use the res
 
 ## Steps
 
-1. edit `config.py` or your game key mapping; in default `config.py`, key mapping from left to right is `a, d, ;, '`.
+1. edit `config.py` and your game key mapping; in default `config.py`, key mapping from left to right is `a, d, ;, '`. if you are HMT sv player, set `PROCESS_NAME` in `config.py` to `nikke_launcher_hmt.exe`.
 
 2. if you want to install manually, just running `pip install -r requirements.txt`. (if you use venv or other virtual env, I bet you are good at this)  
 
