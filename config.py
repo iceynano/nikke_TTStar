@@ -18,6 +18,7 @@ KEYS = {
 # Regions: (left, top, width, height)
 # All coordinates are relative to the game window's top-left corner (after capture_window)
 # Please update these hardcoded placeholders according to your game window layout
+# Region is used to detect notes. Template matching happens here.
 REGIONS = {
     "full_window": (50, 610, 430, 105), # General region for overall scanning if needed
     "slot_1": (30, 620, 120, 100),
@@ -28,6 +29,7 @@ REGIONS = {
 
 # Strip buffer regions for each slot relative to the slot's top-left corner: (offset_x, offset_y, bf_w, bf_h)
 # Adjust offset_x and offset_y so the buffer area sits exactly where the long-press strip appears.
+# Strip area is used to calculate *highlight* effect(colored area moving along the strip) for long note press.
 STRIP_BUFFER_REGIONS = {
     "full_window": (50, -30, 60, 20), # Buffer region for cross_tap strip
     "slot_1": (50, -20, 60, 20),
@@ -53,6 +55,25 @@ BG_AREAS = {
     "slot_2": (30, -20, 70, 40),
     "slot_3": (0, -20, 50, 30),
     "slot_4": (0, -20, 60, 30),
+}
+
+# mid-line: 268*2=536
+TRANSFORM_AREA = {(50, 600), (486, 600), (41, 620), (495, 620)} # (top-left, top-right, bottom-left, bottom-right)
+TRANSFORM_SIZE = (436, 20)
+TRANSFORM_PRE_AREA = {(69, 560), (467, 560), (60, 580), (476, 580)}
+TRANSFORM_PRE_SIZE = (398, 20)
+
+TRANSFORM_SLOTS = {
+    "slot_1": (0, 100),
+    "slot_2": (140, 200),
+    "slot_3": (240, 300),
+    "slot_4": (345, 436),
+}
+TRANSFORM_PRE_SLOT = {
+    "slot_1": (0, 90),
+    "slot_2": (125, 175),
+    "slot_3": (240, 290),
+    "slot_4": (315, 398),
 }
 
 # Threshold for background difference mean absolute error.

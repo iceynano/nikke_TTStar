@@ -5,32 +5,55 @@ import time
 import cv2
 import numpy as np
 
-from main import load_templates, detect_notes, crop_region
-from config import TEST_GAME_WINDOW_REGION
+from main import load_templates, detect_notes, crop_region, check_swipe_strip
+from config import (TEST_GAME_WINDOW_REGION, TRANSFORM_PRE_SLOT, 
+                    TRANSFORM_PRE_AREA, TRANSFORM_PRE_SIZE)
+from async_logger import logger
 
-def print_results(notes, prefix=""):
+def log_results(notes, prefix=""):
     if not notes:
-        print(f"{prefix}No notes detected.")
+        logger.info(f"{prefix}No notes detected.")
     else:
         for note in notes:
-            print(f"{prefix}Found [{note['type']}] in [{note['slot']}] at {note['loc']} (Conf: {note['val']:.3f}, Strip: {note['strip_val']:.0f})")
+            info = f"{prefix}Found [{note['type']}] in [{note['slot']}] at {note['loc']} (Conf: {note['val']:.3f}, Strip: {note['strip_val']:.0f})"
+            if "swipe_strip" in note:
+                info += f" [SWIPE_STRIP: {note['swipe_strip']}]"
+            logger.info(info)
 
 def test_image(image_path, templates, args):
-    print(f"Testing Image: {image_path}")
+    logger.info(f"Testing Image: {image_path}")
     try:
         img = cv2.imread(image_path, cv2.IMREAD_COLOR)
         if img is None:
             raise ValueError("Image could not be loaded")
     except Exception as e:
-        print(f"Error loading image: {e}")
+        logger.info(f"Error loading image: {e}")
         return
 
     game_window_img = crop_region(img, TEST_GAME_WINDOW_REGION)
     st = time.time()
     notes = detect_notes(game_window_img, templates)
+    
+    # Phase 3 — Swipe-Strip Detection for test
+    for note in notes:
+        if note["type"] == "left_swipe":
+            matched_slot = check_swipe_strip(
+                game_window_img, templates, "left",
+                TRANSFORM_PRE_SLOT, TRANSFORM_PRE_AREA, TRANSFORM_PRE_SIZE
+            )
+            if matched_slot:
+                note["swipe_strip"] = matched_slot
+        elif note["type"] == "right_swipe":
+            matched_slot = check_swipe_strip(
+                game_window_img, templates, "right",
+                TRANSFORM_PRE_SLOT, TRANSFORM_PRE_AREA, TRANSFORM_PRE_SIZE
+            )
+            if matched_slot:
+                note["swipe_strip"] = matched_slot
+
     ed = time.time()
-    print(f"Detection Time: {(ed - st) * 1000:.2f} ms")
-    print_results(notes, "  - ")
+    logger.info(f"Detection Time: {(ed - st) * 1000:.2f} ms")
+    log_results(notes, "  - ")
     
     # Visual preview
     preview_img = game_window_img.copy()
@@ -41,6 +64,9 @@ def test_image(image_path, templates, args):
         strip_val = note.get("strip_val", 0)
         if strip_val > 0:
             label += f" [STRIP:{strip_val:.0f}]"
+        
+        if "swipe_strip" in note:
+            label += f" [S_STRIP:{note['swipe_strip']}]"
 
         cv2.rectangle(preview_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
         cv2.putText(preview_img, label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
@@ -59,11 +85,11 @@ def get_video_info(video_path):
         info = json.loads(result.stdout)
         return info["streams"][0]["width"], info["streams"][0]["height"]
     except Exception as e:
-        print(f"Error getting video info with ffprobe: {e}")
+        logger.info(f"Error getting video info with ffprobe: {e}")
         return None, None
 
 def test_video(video_path, interval, templates, args):
-    print(f"Testing Video: {video_path} (Extracting every {interval} frames via ffmpeg pipe)")
+    logger.info(f"Testing Video: {video_path} (Extracting every {interval} frames via ffmpeg pipe)")
     width, height = get_video_info(video_path)
     if not width or not height:
         return
@@ -84,7 +110,7 @@ def test_video(video_path, interval, templates, args):
     try:
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except FileNotFoundError:
-        print("Error: ffmpeg not found. Please ensure ffmpeg is installed and in your PATH.")
+        logger.info("Error: ffmpeg not found. Please ensure ffmpeg is installed and in your PATH.")
         return
 
     frame_count = 0
@@ -103,13 +129,31 @@ def test_video(video_path, interval, templates, args):
 
         st = time.time()
         notes = detect_notes(game_window_img, templates, use_line_detection=args.line_test)
+        
+        # Phase 3 — Swipe-Strip Detection for test
+        for note in notes:
+            if note["type"] == "left_swipe":
+                matched_slot = check_swipe_strip(
+                    game_window_img, templates, "left",
+                    TRANSFORM_PRE_SLOT, TRANSFORM_PRE_AREA, TRANSFORM_PRE_SIZE
+                )
+                if matched_slot:
+                    note["swipe_strip"] = matched_slot
+            elif note["type"] == "right_swipe":
+                matched_slot = check_swipe_strip(
+                    game_window_img, templates, "right",
+                    TRANSFORM_PRE_SLOT, TRANSFORM_PRE_AREA, TRANSFORM_PRE_SIZE
+                )
+                if matched_slot:
+                    note["swipe_strip"] = matched_slot
+
         ed = time.time()
 
-        print(f"--- Frame {extracted_idx} ({(ed-st)*1000:.2f}ms) ---")
-        print_results(notes, "  ")
+        logger.info(f"--- Frame {extracted_idx} ({(ed-st)*1000:.2f}ms) ---")
+        log_results(notes, "  ")
 
     process.wait()
-    print("Video processing complete.")
+    logger.info("Video processing complete.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test Rhythm Game Automation Detection")
@@ -120,10 +164,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if not args.image and not args.video:
-        print("Please provide either --image or --video argument.")
+        logger.info("Please provide either --image or --video argument.")
         exit(1)
 
-    print("Loading templates...")
+    logger.info("Loading templates...")
     templates = load_templates()
 
     if args.image:

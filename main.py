@@ -15,22 +15,26 @@ except ImportError:
 
 import cv2
 from module import find_window_by_process, capture_window, match_template, match_hsv_region, newpress, id_timer
-from config import PROCESS_NAME, SUBPROCESS_NAME, KEYS, REGIONS, MATCH_THRESHOLD, STRIP_BUFFER_REGIONS, BG_AREAS, BG_DIFF_THRESHOLD, HSV_PROFILES
+from async_logger import logger
+from config import (PROCESS_NAME, SUBPROCESS_NAME, KEYS, REGIONS, MATCH_THRESHOLD, STRIP_BUFFER_REGIONS,
+                     BG_AREAS, BG_DIFF_THRESHOLD, HSV_PROFILES,
+                     TRANSFORM_AREA, TRANSFORM_SIZE, TRANSFORM_SLOTS,
+                     TRANSFORM_PRE_AREA, TRANSFORM_PRE_SIZE, TRANSFORM_PRE_SLOT)
 
 def load_templates():
     base_path = os.path.join("assets", "template")
     templates = {}
-    for name in ["cross_tap", "tap", "left_swipe", "right_swipe", "strip_ignore"]:
+    for name in ["cross_tap", "tap", "left_swipe", "right_swipe", "strip_ignore", "L_Strip", "R_Strip"]:
         path = os.path.join(base_path, f"{name}.png")
         if os.path.exists(path):
             img = cv2.imread(path, cv2.IMREAD_COLOR)
             if img is not None:
                 templates[name] = img
             else:
-                print(f"Warning: Template {name}.png could not be loaded at {path}")
+                logger.warn(f"Template {name}.png could not be loaded at {path}")
                 templates[name] = None
         else:
-            print(f"Warning: Template {name}.png not found at {path}")
+            logger.warn(f"Template {name}.png not found at {path}")
             templates[name] = None
     return templates
 
@@ -38,6 +42,7 @@ def crop_region(image: np.ndarray, region: tuple):
     left, top, width, height = region
     return image[top:top + height, left:left + width]
 
+@profile
 def check_strip_color(window_img, crop_box):
     strip_img = crop_region(window_img, crop_box)
     if strip_img.size == 0: return 0
@@ -45,8 +50,81 @@ def check_strip_color(window_img, crop_box):
     mean_sq_sum = np.sum(mean_color ** 2)
     return mean_sq_sum
 
+def _sort_area_points(area_set):
+    """Sort a set of 4 corner points into order: TL, TR, BL, BR (by y then x)."""
+    pts = list(area_set)
+    pts.sort(key=lambda p: (p[1], p[0]))
+    return np.array(pts, dtype=np.float32)
+
+def perspective_warp(image, area_set, target_size):
+    """
+    Crop and perspective-warp a quadrilateral region from image into a rectangle.
+    area_set: set of 4 (x, y) corner points
+    target_size: (width, height) of the output rectangle
+    """
+    src_pts = _sort_area_points(area_set)
+    width, height = target_size
+    dst_pts = np.array([
+        [0, 0],
+        [width, 0],
+        [0, height],
+        [width, height]
+    ], dtype=np.float32)
+    M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+    return cv2.warpPerspective(image, M, (width, height))
+
 @profile
-def detect_notes(window_img, templates, holding_flags=None):
+def check_swipe_strip(window_img, templates, swipe_direction, slot_config, area_set, target_size, threshold=MATCH_THRESHOLD):
+    """
+    Phase 3 Swipe-Strip Detection: perspective warp TRANSFORM_PRE_AREA, split into slots,
+    and match L_Strip or R_Strip. Returns the matched slot key or None.
+    
+    swipe_direction: 'left' or 'right'
+    """
+    template_name = "L_Strip" if swipe_direction == "left" else "R_Strip"
+    tmpl = templates.get(template_name)
+    if tmpl is None:
+        return None
+
+    warped = perspective_warp(window_img, area_set, target_size)
+
+    for slot_key, (x_start, x_end) in slot_config.items():
+        slot_img = warped[:, x_start:x_end]
+        if slot_img.size == 0:
+            continue
+        loc, w, h, val = match_template(slot_img, tmpl, threshold=threshold)
+        if loc is not None:
+            return slot_key  # Found a match — remember this slot and break
+
+    return None
+
+@profile
+def sustain_swipe_strip(window_img, templates, swipe_direction, remembered_slot, slot_config, area_set, target_size, threshold=MATCH_THRESHOLD):
+    """
+    Phase 1.5 Swipe-Strip Sustain Check: perspective warp TRANSFORM_AREA,
+    check only the remembered slot for L/R_Strip.
+    Returns True if the strip is still present, False if it should be released.
+    """
+    template_name = "L_Strip" if swipe_direction == "left" else "R_Strip"
+    tmpl = templates.get(template_name)
+    if tmpl is None:
+        return False
+
+    warped = perspective_warp(window_img, area_set, target_size)
+
+    x_start, x_end = slot_config.get(remembered_slot, (0, 0))
+    if x_end <= x_start:
+        return False
+
+    slot_img = warped[:, x_start:x_end]
+    if slot_img.size == 0:
+        return False
+
+    loc, w, h, val = match_template(slot_img, tmpl, threshold=threshold)
+    return loc is not None
+
+@profile
+def detect_notes(window_img, templates, holding_flags=None, swipe_pressed=None):
     detected = []
 
     # 1. Check for cross_tap in full_window
@@ -54,6 +132,8 @@ def detect_notes(window_img, templates, holding_flags=None):
     cross_tap_key = KEYS["cross_tap"]
     is_cross_tap_held = holding_flags and holding_flags.get(cross_tap_key, False)
     cross_tap_detected = False
+    lswipe_detected = False
+    rswipe_detected = False
 
     if not is_cross_tap_held:
         full_img = crop_region(window_img, full_region)
@@ -76,8 +156,8 @@ def detect_notes(window_img, templates, holding_flags=None):
             )
 
         # Fallback: template matching (for cases HSV might miss)
-        if loc is None and templates.get("cross_tap") is not None:
-            loc, w, h, val = match_template(full_img, templates["cross_tap"], threshold=MATCH_THRESHOLD)
+        # if loc is None and templates.get("cross_tap") is not None:
+        #     loc, w, h, val = match_template(full_img, templates["cross_tap"], threshold=MATCH_THRESHOLD)
 
         if loc:
             abs_loc = (loc[0] + full_region[0], loc[1] + full_region[1])
@@ -110,6 +190,16 @@ def detect_notes(window_img, templates, holding_flags=None):
 
         # We only expect one type of note per slot at a time, break early if found
         for note_type in ["tap", "left_swipe", "right_swipe"]:
+            # Skip swipe detection if the corresponding shift is already held
+            if note_type == "left_swipe" and swipe_pressed and swipe_pressed.get("left", False):
+                continue
+            if note_type == "right_swipe" and swipe_pressed and swipe_pressed.get("right", False):
+                continue
+            # skip if left_swipe or right_swipe is already detected (in the same frame)
+            if note_type == "left_swipe" and lswipe_detected:
+                continue
+            if note_type == "right_swipe" and rswipe_detected:
+                continue
 
             if templates.get(note_type) is not None:
                 loc, w, h, val = match_template(slot_img, templates[note_type], threshold=MATCH_THRESHOLD)
@@ -125,6 +215,10 @@ def detect_notes(window_img, templates, holding_flags=None):
                             strip_val = check_strip_color(window_img, buffer_crop_box)
 
                     detected.append({"type": note_type, "slot": slot_key, "loc": abs_loc, "val": val, "w": w, "h": h, "strip_val": strip_val})
+                    if note_type == "left_swipe":
+                        lswipe_detected = True
+                    if note_type == "right_swipe":
+                        rswipe_detected = True
                     break
 
     return detected
@@ -149,20 +243,20 @@ def main():
         benchmark_dir = os.path.join("assets", "test", "benchmark", "screenshots", datetime.now().strftime("%Y%m%d_%H%M%S"))
         os.makedirs(benchmark_dir, exist_ok=True)
         threading.Thread(target=image_saver_worker, args=(benchmark_queue,), daemon=True).start()
-        print(f"Benchmark mode enabled. Saving screenshots to {benchmark_dir}")
+        logger.info(f"Benchmark mode enabled. Saving screenshots to {benchmark_dir}")
 
-    print("Loading templates...")
+    logger.info("Loading templates...")
     templates = load_templates()
 
-    print(f"Waiting for game window ({PROCESS_NAME} -> {SUBPROCESS_NAME})...")
+    logger.info(f"Waiting for game window ({PROCESS_NAME} -> {SUBPROCESS_NAME})...")
     hwnd = None
     while not hwnd:
         hwnd = find_window_by_process(PROCESS_NAME, SUBPROCESS_NAME)
         if not hwnd:
             time.sleep(1)
 
-    print(f"Found game window! Handle: {hwnd}")
-    print("Starting detection loop. Press Ctrl+C to stop.")
+    logger.info(f"Found game window! Handle: {hwnd}")
+    logger.info("Starting detection loop. Press Ctrl+C to stop.")
 
     tick = id_timer()
 
@@ -174,6 +268,11 @@ def main():
     recorded_bgs = {key: None for key in KEYS.values()}
     bg_save_times = {key: 0.0 for key in KEYS.values()}
     forzed_times = {key: 0.0 for key in KEYS.values()}
+    # Swipe-hold state (hard mode)
+    L_swipe_pressed = False
+    R_swipe_pressed = False
+    L_remembered_slot = None  # single slot key, e.g. "slot_2"
+    R_remembered_slot = None
     for key in KEYS.values():
         tick(f'press_{key}')
         # Pre-warm the key mappings for the keyboard module hook install
@@ -195,7 +294,7 @@ def main():
 
                 current_time = time.time()
 
-                # 2. Continuous Background Difference Check for slots 1-4 and full_window (cross_tap)
+                # 2. Phase 1 — Continuous Background Difference Check for slots 1-4 and full_window (cross_tap)
                 for slot in ["full_window", "slot_1", "slot_2", "slot_3", "slot_4"]:
                     key = KEYS["cross_tap"] if slot == "full_window" else KEYS[slot]
                     if holding_flags[key] and (current_time - strip_start_times[key] >= 0.05):
@@ -218,7 +317,7 @@ def main():
                                         if ignore_loc:
                                             is_ignore = True
                                             forzed_times[key] = current_time
-                                            print(f"SUSPECT detect ignored for {slot}")
+                                            logger.info(f"SUSPECT detect ignored for {slot}")
                                     if not is_ignore and current_time - forzed_times[key] > 0.08:
                                         if current_time - tick(f'press_{key}') > COOLDOWN_TIME:
                                             newpress(key, tick, action='up')
@@ -230,8 +329,34 @@ def main():
                                     cv2.imwrite(filename, bg_img_uint8)
                                     bg_save_times[key] = current_time
 
-                # 3. Detect notes
-                detected_notes = detect_notes(window_img, templates, holding_flags=holding_flags)
+                # 2.5. Phase 1.5 — Swipe-Strip Sustain Check
+                if L_swipe_pressed and L_remembered_slot is not None:
+                    still_present = sustain_swipe_strip(
+                        window_img, templates, "left", L_remembered_slot,
+                        TRANSFORM_SLOTS, TRANSFORM_AREA, TRANSFORM_SIZE
+                    )
+                    if not still_present:
+                        lkey = KEYS["left_swipe"]
+                        if current_time - tick(f'press_{lkey}') > COOLDOWN_TIME:
+                            newpress(lkey, tick, action='up')
+                        L_swipe_pressed = False
+                        L_remembered_slot = None
+
+                if R_swipe_pressed and R_remembered_slot is not None:
+                    still_present = sustain_swipe_strip(
+                        window_img, templates, "right", R_remembered_slot,
+                        TRANSFORM_SLOTS, TRANSFORM_AREA, TRANSFORM_SIZE
+                    )
+                    if not still_present:
+                        rkey = KEYS["right_swipe"]
+                        if current_time - tick(f'press_{rkey}') > COOLDOWN_TIME:
+                            newpress(rkey, tick, action='up')
+                        R_swipe_pressed = False
+                        R_remembered_slot = None
+
+                # 3. Phase 2 — Detect notes (skip swipe detection if already held)
+                swipe_pressed = {"left": L_swipe_pressed, "right": R_swipe_pressed}
+                detected_notes = detect_notes(window_img, templates, holding_flags=holding_flags, swipe_pressed=swipe_pressed)
 
                 # Check if cross_tap is triggered to prevent conflicts
                 cross_tap_detected = any(note["type"] == "cross_tap" for note in detected_notes)
@@ -267,14 +392,53 @@ def main():
                                 if current_time - tick(f'press_{key}') > COOLDOWN_TIME:
                                     newpress(key, tick, action='tap')
                     else:
-                        if current_time - tick(f'press_{key}') > COOLDOWN_TIME:
-                            newpress(key, tick, action='tap')
+                        # Phase 3 — Swipe-Strip Detection for left/right swipe
+                        if note["type"] == "left_swipe":
+                            matched_slot = check_swipe_strip(
+                                window_img, templates, "left",
+                                TRANSFORM_PRE_SLOT, TRANSFORM_PRE_AREA, TRANSFORM_PRE_SIZE
+                            )
+                            if matched_slot is not None:
+                                # Strip found — hold the key
+                                lkey = KEYS["left_swipe"]
+                                if current_time - tick(f'press_{lkey}') > COOLDOWN_TIME:
+                                    newpress(lkey, tick, action='down')
+                                    L_swipe_pressed = True
+                                    L_remembered_slot = matched_slot
+                                    logger.info(f"L_Strip detected in {matched_slot}, holding left shift")
+                            else:
+                                # No strip — normal tap
+                                if current_time - tick(f'press_{key}') > COOLDOWN_TIME:
+                                    newpress(key, tick, action='tap')
+                        elif note["type"] == "right_swipe":
+                            matched_slot = check_swipe_strip(
+                                window_img, templates, "right",
+                                TRANSFORM_PRE_SLOT, TRANSFORM_PRE_AREA, TRANSFORM_PRE_SIZE
+                            )
+                            if matched_slot is not None:
+                                # Strip found — hold the key
+                                rkey = KEYS["right_swipe"]
+                                if current_time - tick(f'press_{rkey}') > COOLDOWN_TIME:
+                                    newpress(rkey, tick, action='down')
+                                    R_swipe_pressed = True
+                                    R_remembered_slot = matched_slot
+                                    logger.info(f"R_Strip detected in {matched_slot}, holding right shift")
+                            else:
+                                # No strip — normal tap
+                                if current_time - tick(f'press_{key}') > COOLDOWN_TIME:
+                                    newpress(key, tick, action='tap')
+                        else:
+                            if current_time - tick(f'press_{key}') > COOLDOWN_TIME:
+                                newpress(key, tick, action='tap')
 
                 # Small sleep to prevent 100% CPU usage, adjust based on required frame rate
                 # time.sleep(0.01)
 
     except KeyboardInterrupt:
-        print("Loop stopped by user.")
+        logger.info("Loop stopped by user.")
+        logger.stop()
+        newpress(KEYS["left_swipe"], tick, action='up')
+        newpress(KEYS["right_swipe"], tick, action='up')
 
 if __name__ == "__main__":
     main()

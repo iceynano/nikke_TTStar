@@ -11,6 +11,7 @@ import win32process
 import keyboard
 from config import KEYS
 from datetime import datetime
+from async_logger import logger
 
 try:
     from line_profiler import profile
@@ -200,7 +201,7 @@ def newpress(sig, tick, action='tap', mode='Noise', interval=0.15):
         continue
     
     if delayed:
-        print(f">>>>>>>>>>{inverse_KEYS[sig]} {action} delayed<<<<<<<<<<")
+        logger.warn(f"{inverse_KEYS[sig]} {action} delayed")
 
     if action in ['tap', 'down']:
         keyboard.press(sig)
@@ -209,4 +210,4 @@ def newpress(sig, tick, action='tap', mode='Noise', interval=0.15):
         
     tick(f'press_{sig}', True)
     if mode == 'Noise':
-        print(f"{inverse_KEYS[sig]} {action}ped! Time: {datetime.now().strftime('%H_%M_%S_%f')[:-3]}")
+        logger.info(f"{inverse_KEYS[sig]} {action}ped!")
