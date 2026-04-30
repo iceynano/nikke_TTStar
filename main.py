@@ -77,13 +77,13 @@ def perspective_warp(image, area_set, target_size):
 def check_swipe_strip(window_img, templates, swipe_direction, slot_config, area_set, target_size, threshold=MATCH_THRESHOLD):
     """
     Phase 3 Swipe-Strip Detection: perspective warp TRANSFORM_PRE_AREA, split into slots,
-    and match L_Strip or R_Strip. Returns the matched slot key or None.
+    and match L_Strip or R_Strip via HSV color detection. Returns the matched slot key or None.
     
     swipe_direction: 'left' or 'right'
     """
     template_name = "L_Strip" if swipe_direction == "left" else "R_Strip"
-    tmpl = templates.get(template_name)
-    if tmpl is None:
+    hsv_profile = HSV_PROFILES.get(template_name)
+    if hsv_profile is None:
         return None
 
     warped = perspective_warp(window_img, area_set, target_size)
@@ -92,7 +92,15 @@ def check_swipe_strip(window_img, templates, swipe_direction, slot_config, area_
         slot_img = warped[:, x_start:x_end]
         if slot_img.size == 0:
             continue
-        loc, w, h, val = match_template(slot_img, tmpl, threshold=threshold)
+        loc, w, h, val = match_hsv_region(
+            slot_img,
+            target_hsv=hsv_profile["target_hsv"],
+            target_size=hsv_profile["target_size"],
+            threshold=hsv_profile["threshold"],
+            hue_tol=hsv_profile["hue_tol"],
+            sat_range=hsv_profile["sat_range"],
+            val_range=hsv_profile["val_range"],
+        )
         if loc is not None:
             return slot_key  # Found a match — remember this slot and break
 
@@ -102,12 +110,12 @@ def check_swipe_strip(window_img, templates, swipe_direction, slot_config, area_
 def sustain_swipe_strip(window_img, templates, swipe_direction, remembered_slot, slot_config, area_set, target_size, threshold=MATCH_THRESHOLD):
     """
     Phase 1.5 Swipe-Strip Sustain Check: perspective warp TRANSFORM_AREA,
-    check only the remembered slot for L/R_Strip.
+    check only the remembered slot for L/R_Strip via HSV color detection.
     Returns True if the strip is still present, False if it should be released.
     """
     template_name = "L_Strip" if swipe_direction == "left" else "R_Strip"
-    tmpl = templates.get(template_name)
-    if tmpl is None:
+    hsv_profile = HSV_PROFILES.get(template_name)
+    if hsv_profile is None:
         return False
 
     warped = perspective_warp(window_img, area_set, target_size)
@@ -120,7 +128,15 @@ def sustain_swipe_strip(window_img, templates, swipe_direction, remembered_slot,
     if slot_img.size == 0:
         return False
 
-    loc, w, h, val = match_template(slot_img, tmpl, threshold=threshold)
+    loc, w, h, val = match_hsv_region(
+        slot_img,
+        target_hsv=hsv_profile["target_hsv"],
+        target_size=hsv_profile["target_size"],
+        threshold=hsv_profile["threshold"],
+        hue_tol=hsv_profile["hue_tol"],
+        sat_range=hsv_profile["sat_range"],
+        val_range=hsv_profile["val_range"],
+    )
     return loc is not None
 
 @profile
@@ -172,8 +188,8 @@ def detect_notes(window_img, templates, holding_flags=None, swipe_pressed=None):
             cross_tap_detected = True
 
     # If cross_tap is currently held OR we just detected it, we can skip the individual slots
-    if is_cross_tap_held or cross_tap_detected:
-        return detected
+    # if is_cross_tap_held or cross_tap_detected:
+    #     return detected
 
     # 2. Iterate through each slot for specific notes
     for i in range(1, 5):
@@ -201,25 +217,40 @@ def detect_notes(window_img, templates, holding_flags=None, swipe_pressed=None):
             if note_type == "right_swipe" and rswipe_detected:
                 continue
 
-            if templates.get(note_type) is not None:
+            # Swipe notes use HSV color detection (immune to ±15px screen shake)
+            hsv_profile = HSV_PROFILES.get(note_type)
+            if note_type in ("left_swipe", "right_swipe") and hsv_profile:
+                loc, w, h, val = match_hsv_region(
+                    slot_img,
+                    target_hsv=hsv_profile["target_hsv"],
+                    target_size=hsv_profile["target_size"],
+                    threshold=hsv_profile["threshold"],
+                    hue_tol=hsv_profile["hue_tol"],
+                    sat_range=hsv_profile["sat_range"],
+                    val_range=hsv_profile["val_range"],
+                )
+            elif templates.get(note_type) is not None:
+                # Tap notes: still use template matching (tap doesn't trigger shift, no shake)
                 loc, w, h, val = match_template(slot_img, templates[note_type], threshold=MATCH_THRESHOLD)
+            else:
+                continue
 
-                if loc:
-                    abs_loc = (loc[0] + region[0], loc[1] + region[1])
-                    strip_val = 0
+            if loc:
+                abs_loc = (loc[0] + region[0], loc[1] + region[1])
+                strip_val = 0
 
-                    if note_type == "tap":
-                        offset_x, offset_y, bf_w, bf_h = STRIP_BUFFER_REGIONS.get(slot_key, (0, 0, 0, 0))
-                        if bf_w > 0 and bf_h > 0:
-                            buffer_crop_box = (region[0] + offset_x, region[1] + offset_y, bf_w, bf_h)
-                            strip_val = check_strip_color(window_img, buffer_crop_box)
+                if note_type == "tap":
+                    offset_x, offset_y, bf_w, bf_h = STRIP_BUFFER_REGIONS.get(slot_key, (0, 0, 0, 0))
+                    if bf_w > 0 and bf_h > 0:
+                        buffer_crop_box = (region[0] + offset_x, region[1] + offset_y, bf_w, bf_h)
+                        strip_val = check_strip_color(window_img, buffer_crop_box)
 
-                    detected.append({"type": note_type, "slot": slot_key, "loc": abs_loc, "val": val, "w": w, "h": h, "strip_val": strip_val})
-                    if note_type == "left_swipe":
-                        lswipe_detected = True
-                    if note_type == "right_swipe":
-                        rswipe_detected = True
-                    break
+                detected.append({"type": note_type, "slot": slot_key, "loc": abs_loc, "val": val, "w": w, "h": h, "strip_val": strip_val})
+                if note_type == "left_swipe":
+                    lswipe_detected = True
+                if note_type == "right_swipe":
+                    rswipe_detected = True
+                break
 
     return detected
 
@@ -261,7 +292,7 @@ def main():
     tick = id_timer()
 
     # Adjust cooldown interval as needed based on the game's note speed
-    COOLDOWN_TIME = 0.15
+    COOLDOWN_TIME = 0.05
 
     holding_flags = {key: False for key in KEYS.values()}
     strip_start_times = {key: 0.0 for key in KEYS.values()}
@@ -362,8 +393,8 @@ def main():
                 cross_tap_detected = any(note["type"] == "cross_tap" for note in detected_notes)
                 
                 for note in detected_notes:
-                    if cross_tap_detected and note["type"] != "cross_tap":
-                        continue # If cross_tap is present, ignore other notes
+                    # if cross_tap_detected and note["type"] != "cross_tap":
+                    #     continue # If cross_tap is present, ignore other notes
 
                     slot = note["slot"]
                     if note["type"] == "cross_tap":

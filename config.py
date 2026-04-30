@@ -98,4 +98,41 @@ HSV_PROFILES = {
         "sat_range": (180, 255),       # saturation drops when brightness maxes out, so keep floor low
         "val_range": (180, 255),       # WIDE range — this is what makes it immune to brightness boost
     },
+    # Swipe notes — HSV detection for shake-immunity (replaces template matching)
+    # left_swipe.png: H=40-41, S=221-236, V=153-177
+    "left_swipe": {
+        "target_hsv": (41, 230, 159),
+        "target_size": (51, 12),       # matches left_swipe.png dimensions
+        "threshold": 0.75,
+        "hue_tol": 8,                  # H range: 33-49
+        "sat_range": (200, 255),
+        "val_range": (100, 220),       # wide to survive brightness effects
+    },
+    # right_swipe.png: H=146-149, S=255, V=128-156
+    "right_swipe": {
+        "target_hsv": (147, 255, 135),
+        "target_size": (51, 12),       # matches right_swipe.png dimensions
+        "threshold": 0.75,
+        "hue_tol": 8,                  # H range: 139-155
+        "sat_range": (200, 255),
+        "val_range": (80, 200),        # wide to survive brightness effects
+    },
+    # L_Strip.png: H=38-39, S=230-235, V=149-187 (same hue family as left_swipe)
+    "L_Strip": {
+        "target_hsv": (39, 233, 164),
+        "target_size": (8, 15),        # matches L_Strip.png dimensions
+        "threshold": 0.65,
+        "hue_tol": 10,                 # H range: 29-49
+        "sat_range": (190, 255),
+        "val_range": (90, 230),        # wide for strip brightness variation
+    },
+    # R_Strip.png: H=149-152, S=229-233, V=143-189 (same hue family as right_swipe)
+    "R_Strip": {
+        "target_hsv": (150, 231, 162),
+        "target_size": (8, 15),        # matches R_Strip.png dimensions
+        "threshold": 0.65,
+        "hue_tol": 10,                 # H range: 140-160
+        "sat_range": (190, 255),
+        "val_range": (90, 230),        # wide for strip brightness variation
+    },
 }
