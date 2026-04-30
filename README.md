@@ -42,4 +42,10 @@ there is a toggle(save_buff) in the code to save runtime screenshots for long no
 
 ## Demo (beta ver)
 
+### v0.1b
+
 https://github.com/user-attachments/assets/30e6f4bb-6756-4ff1-abc9-e687d0a2410d
+
+### v0.2b
+
+https://github.com/user-attachments/assets/03f0b347-3ead-4315-8581-8447094ffbad
