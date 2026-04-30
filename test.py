@@ -5,7 +5,8 @@ import time
 import cv2
 import numpy as np
 
-from main import load_templates, detect_notes, crop_region, check_swipe_strip
+from main import detect_notes
+from module import load_templates, crop_region, check_swipe_strip
 from config import (TEST_GAME_WINDOW_REGION, TRANSFORM_PRE_SLOT, 
                     TRANSFORM_PRE_AREA, TRANSFORM_PRE_SIZE)
 from async_logger import logger
@@ -128,7 +129,7 @@ def test_video(video_path, interval, templates, args):
         game_window_img = crop_region(image, TEST_GAME_WINDOW_REGION)
 
         st = time.time()
-        notes = detect_notes(game_window_img, templates, use_line_detection=args.line_test)
+        notes = detect_notes(game_window_img, templates)
         
         # Phase 3 — Swipe-Strip Detection for test
         for note in notes:
@@ -160,7 +161,6 @@ if __name__ == "__main__":
     parser.add_argument("--image", type=str, help="Path to a screenshot image to test")
     parser.add_argument("--video", type=str, help="Path to a video file to test")
     parser.add_argument("--interval", type=int, default=10, help="Frame extraction interval for video (default: 10)")
-    parser.add_argument("--line-test", action="store_true", help="Use horizontal line detection instead of template matching for tap notes")
     args = parser.parse_args()
 
     if not args.image and not args.video:

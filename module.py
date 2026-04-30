@@ -1,7 +1,7 @@
+import os
 import cv2
 import numpy as np
 import mss
-import pyautogui
 import win32gui
 import time
 import copy
@@ -9,8 +9,7 @@ import psutil
 import win32process
 
 import keyboard
-from config import KEYS
-from datetime import datetime
+from config import KEYS, MATCH_THRESHOLD, HSV_PROFILES
 from async_logger import logger
 
 try:
@@ -211,3 +210,134 @@ def newpress(sig, tick, action='tap', mode='Noise', interval=0.15):
     tick(f'press_{sig}', True)
     if mode == 'Noise':
         logger.info(f"{inverse_KEYS[sig]} {action}ped!")
+
+
+# ─── Reusable image / detection utilities ────────────────────────────────────
+
+def load_templates():
+    """Load all note template images from assets/template/."""
+    base_path = os.path.join("assets", "template")
+    templates = {}
+    for name in ["cross_tap", "tap", "left_swipe", "right_swipe", "strip_ignore", "L_Strip", "R_Strip"]:
+        path = os.path.join(base_path, f"{name}.png")
+        if os.path.exists(path):
+            img = cv2.imread(path, cv2.IMREAD_COLOR)
+            if img is not None:
+                templates[name] = img
+            else:
+                logger.warn(f"Template {name}.png could not be loaded at {path}")
+                templates[name] = None
+        else:
+            logger.warn(f"Template {name}.png not found at {path}")
+            templates[name] = None
+    return templates
+
+
+def crop_region(image: np.ndarray, region: tuple):
+    """Crop a rectangular region from an image. region = (left, top, width, height)."""
+    left, top, width, height = region
+    return image[top:top + height, left:left + width]
+
+
+def _sort_area_points(area_set):
+    """Sort a set of 4 corner points into order: TL, TR, BL, BR (by y then x)."""
+    pts = list(area_set)
+    pts.sort(key=lambda p: (p[1], p[0]))
+    return np.array(pts, dtype=np.float32)
+
+
+@profile
+def perspective_warp(image, area_set, target_size):
+    """
+    Crop and perspective-warp a quadrilateral region from image into a rectangle.
+    area_set: set of 4 (x, y) corner points
+    target_size: (width, height) of the output rectangle
+    """
+    src_pts = _sort_area_points(area_set)
+    width, height = target_size
+    dst_pts = np.array([
+        [0, 0],
+        [width, 0],
+        [0, height],
+        [width, height]
+    ], dtype=np.float32)
+    M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+    return cv2.warpPerspective(image, M, (width, height))
+
+
+@profile
+def check_strip_color(window_img, crop_box):
+    """Calculate mean squared color sum in a crop region (for long-press strip highlight detection)."""
+    strip_img = crop_region(window_img, crop_box)
+    if strip_img.size == 0: return 0
+    mean_color = np.mean(strip_img, axis=(0, 1))
+    mean_sq_sum = np.sum(mean_color ** 2)
+    return mean_sq_sum
+
+
+@profile
+def check_swipe_strip(window_img, templates, swipe_direction, slot_config, area_set, target_size, threshold=MATCH_THRESHOLD):
+    """
+    Phase 3 Swipe-Strip Detection: perspective warp TRANSFORM_PRE_AREA, split into slots,
+    and match L_Strip or R_Strip via HSV color detection. Returns the matched slot key or None.
+    
+    swipe_direction: 'left' or 'right'
+    """
+    template_name = "L_Strip" if swipe_direction == "left" else "R_Strip"
+    hsv_profile = HSV_PROFILES.get(template_name)
+    if hsv_profile is None:
+        return None
+
+    warped = perspective_warp(window_img, area_set, target_size)
+
+    for slot_key, (x_start, x_end) in slot_config.items():
+        slot_img = warped[:, x_start:x_end]
+        if slot_img.size == 0:
+            continue
+        loc, w, h, val = match_hsv_region(
+            slot_img,
+            target_hsv=hsv_profile["target_hsv"],
+            target_size=hsv_profile["target_size"],
+            threshold=hsv_profile["threshold"],
+            hue_tol=hsv_profile["hue_tol"],
+            sat_range=hsv_profile["sat_range"],
+            val_range=hsv_profile["val_range"],
+        )
+        if loc is not None:
+            return slot_key  # Found a match — remember this slot and break
+
+    return None
+
+
+@profile
+def sustain_swipe_strip(window_img, templates, swipe_direction, remembered_slot, slot_config, area_set, target_size, threshold=MATCH_THRESHOLD):
+    """
+    Phase 1.5 Swipe-Strip Sustain Check: perspective warp TRANSFORM_AREA,
+    check only the remembered slot for L/R_Strip via HSV color detection.
+    Returns True if the strip is still present, False if it should be released.
+    """
+    template_name = "L_Strip" if swipe_direction == "left" else "R_Strip"
+    hsv_profile = HSV_PROFILES.get(template_name)
+    if hsv_profile is None:
+        return False
+
+    warped = perspective_warp(window_img, area_set, target_size)
+
+    x_start, x_end = slot_config.get(remembered_slot, (0, 0))
+    if x_end <= x_start:
+        return False
+
+    slot_img = warped[:, x_start:x_end]
+    if slot_img.size == 0:
+        return False
+
+    loc, w, h, val = match_hsv_region(
+        slot_img,
+        target_hsv=hsv_profile["target_hsv"],
+        target_size=hsv_profile["target_size"],
+        threshold=hsv_profile["threshold"],
+        hue_tol=hsv_profile["hue_tol"],
+        sat_range=hsv_profile["sat_range"],
+        val_range=hsv_profile["val_range"],
+    )
+    return loc is not None
